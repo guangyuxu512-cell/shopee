@@ -1,0 +1,73 @@
+name: Windows ZIP Smoke Test
+
+on:
+  push:
+    paths:
+      - 'ci-smoke/**'
+      - '.github/workflows/ci-smoke-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-package:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ci-smoke
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ci-smoke/go.mod
+          cache: false
+
+      - name: Compile and test
+        shell: pwsh
+        run: go test ./...
+
+      - name: Build standalone Windows x64 EXE
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          $env:CGO_ENABLED = '0'
+          go build -trimpath -ldflags '-s -w -H=windowsgui' -o 'dist/ChatGPT-CI-Smoke.exe' .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path 'dist/ChatGPT-CI-Smoke.exe')) { throw 'EXE missing' }
+
+      - name: Execute compiled EXE self-test
+        shell: pwsh
+        run: |
+          $report = Join-Path (Get-Location).Path 'dist/self-test.txt'
+          $process = Start-Process -FilePath (Join-Path (Get-Location).Path 'dist/ChatGPT-CI-Smoke.exe') -ArgumentList @('--self-test', $report) -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw 'EXE self-test exit code is not zero' }
+          if ((Get-Content -LiteralPath $report -Raw).Trim() -ne 'CI_SMOKE_OK') { throw 'EXE self-test marker mismatch' }
+          Remove-Item -LiteralPath $report
+
+      - name: Add source version and checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -LiteralPath 'dist/ChatGPT-CI-Smoke.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+          @(
+            'ChatGPT CI/CD end-to-end Windows test'
+            'Unzip this package on Windows x64, then double-click ChatGPT-CI-Smoke.exe.'
+            'A success popup verifies the executable launches locally.'
+            "Source commit: ${{ github.sha }}"
+            "SHA256: $hash"
+            'No installation or external runtime required.'
+          ) | Set-Content -LiteralPath 'dist/README.txt' -Encoding utf8
+
+      - name: Upload downloadable ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatGPT-CI-Smoke-Windows-x64
+          path: ci-smoke/dist/
+          if-no-files-found: error
+          retention-days: 7
